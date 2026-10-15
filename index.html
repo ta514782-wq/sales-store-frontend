@@ -67,7 +67,9 @@ const CFG={
  gender_category:{t:'Gender vs category (orders)',type:'bar',pivot:true},
  peak_hours:{t:'Orders by hour of day',type:'bar',x:'hour_of_day',y:['orders'],sort:'hour_of_day'},
  order_status:{t:'Order status',type:'doughnut',x:'status',y:['orders']},
- lost_revenue:{t:'Lost revenue by month',type:'bar',x:'month',y:['cancelled_value','returned_value'],stack:true}
+ lost_revenue:{t:'Lost revenue by month',type:'bar',x:'month',y:['cancelled_value','returned_value'],stack:true},
+ inventory_status:{t:'Stock levels',type:'bar',x:'product_name',y:['stock_qty','reorder_level']},
+ low_stock:{t:'Low stock alert',type:'bar',x:'product_name',y:['stock_qty','reorder_level']}
 };
 const num=v=>v!==null&&v!==''&&!isNaN(v)?Number(v):null;
 const fmt=(k,v)=>{if(v==null)return '-';if(k==='month')return String(v).slice(0,7);const n=num(v);return n!==null&&typeof v!=='boolean'?n.toLocaleString():v};

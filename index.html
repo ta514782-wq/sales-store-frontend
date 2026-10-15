@@ -31,6 +31,8 @@ input,select{width:100%;padding:11px;margin:5px 0;border:1px solid var(--line);b
 #login{max-width:360px;margin:12vh auto;padding:0 16px}
 .err{color:#e03131;font-size:14px;min-height:20px}
 .hide{display:none}
+.fg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+label{font-size:12px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -68,8 +70,9 @@ const CFG={
  peak_hours:{t:'Orders by hour of day',type:'bar',x:'hour_of_day',y:['orders'],sort:'hour_of_day'},
  order_status:{t:'Order status',type:'doughnut',x:'status',y:['orders']},
  lost_revenue:{t:'Lost revenue by month',type:'bar',x:'month',y:['cancelled_value','returned_value'],stack:true},
- inventory_status:{t:'Stock levels',type:'bar',x:'product_name',y:['stock_qty','reorder_level']},
- low_stock:{t:'Low stock alert',type:'bar',x:'product_name',y:['stock_qty','reorder_level']}
+ inventory_status:{t:'Stock levels',type:'bar',x:'product_name',y:['stock_qty','reorder_level'],filt:'none'},
+ low_stock:{t:'Low stock alert',type:'bar',x:'product_name',y:['stock_qty','reorder_level'],filt:'none'},
+ sales_forecast:{t:'Sales forecast (next month)',filt:'cat'}
 };
 const num=v=>v!==null&&v!==''&&!isNaN(v)?Number(v):null;
 const fmt=(k,v)=>{if(v==null)return '-';if(k==='month')return String(v).slice(0,7);const n=num(v);return n!==null&&typeof v!=='boolean'?n.toLocaleString():v};
@@ -100,6 +103,7 @@ async function start(){
     if(['super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
     if(['super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
     if(R==='super_admin')items.push(['__users','Users']);
+    items.push(['__account','Password']);
     $('#nav').innerHTML=items.map(([k,t])=>`<button data-k="${k}">${t.split(' by ')[0].split(' (')[0]}</button>`).join('');
     $('#nav').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.k)};
     show(items[0][0]);
@@ -110,6 +114,32 @@ function table(rows){
   const ks=Object.keys(rows[0]);
   return `<div class="tw"><table><tr>${ks.map(k=>`<th>${lab(k)}</th>`).join('')}</tr>${rows.map(r=>`<tr>${ks.map(k=>`<td>${fmt(k,r[k])}</td>`).join('')}</tr>`).join('')}</table></div>`;
 }
+let FIL={from:'',to:'',cat:''},CATS=null;
+const qs=()=>'?from='+FIL.from+'&to='+FIL.to+'&category='+encodeURIComponent(FIL.cat);
+function filterBar(k,c){
+  const f=c.filt||'all';
+  if(f==='none')return `<div class="card"><button class="out" onclick="csv('${k}')">Download CSV</button><p id="fm" class="err"></p></div>`;
+  const dt=f==='all'?`<label>From<input type="date" id="ff" value="${FIL.from}"></label><label>To<input type="date" id="ft" value="${FIL.to}"></label>`:'';
+  return `<div class="card"><div class="fg">${dt}<label>Category<select id="fc"><option value="">All</option>${CATS.map(x=>`<option${FIL.cat===x?' selected':''}>${esc(x)}</option>`).join('')}</select></label></div><button class="btn" onclick="applyF('${k}')">Apply</button> <button class="out" onclick="resetF('${k}')">Reset</button> <button class="out" onclick="csv('${k}')">Download CSV</button><p id="fm" class="err"></p></div>`;
+}
+function applyF(k){
+  const a=$('#ff'),b=$('#ft');
+  if(a&&b&&a.value&&b.value&&a.value>b.value)return msg('fm','The From date must be before the To date');
+  if(a)FIL.from=a.value;
+  if(b)FIL.to=b.value;
+  FIL.cat=$('#fc').value;
+  show(k);
+}
+function resetF(k){FIL={from:'',to:'',cat:''};show(k)}
+async function csv(k){
+  try{
+    const r=await fetch(API+'/api/dashboard/'+k+qs()+'&format=csv',{headers:{Authorization:'Bearer '+token}});
+    if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||'Download failed')}
+    const b=await r.blob(),a=document.createElement('a');
+    a.href=URL.createObjectURL(b);a.download=k+'.csv';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  }catch(e){msg('fm',e.message)}
+}
 async function show(k){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
   const m=$('#main');m.innerHTML='<div class="card">Loading...</div>';
@@ -119,12 +149,29 @@ async function show(k){
     if(k==='__orders')return orders();
     if(k==='__neworder')return newOrder();
     if(k==='__restock')return restock();
+    if(k==='__account')return account();
     const c=CFG[k]||{t:lab(k)};
-    const {rows}=await api('/api/dashboard/'+k);
+    if(!CATS)CATS=await api('/api/categories');
+    const {rows,forecast}=await api('/api/dashboard/'+k+qs());
+    const fb=filterBar(k,c);
+    const col=getComputedStyle(document.body).color;
     if(k==='overview'){
       const r=rows[0]||{};
       const L={total_orders:'Total orders',delivered_orders:'Delivered',revenue:'Revenue',avg_order_value:'Avg order value',customers:'Customers',cancel_return_pct:'Cancel/return %'};
-      m.innerHTML=`<h2>${c.t}</h2><div class="kpis">${Object.keys(L).map(x=>`<div class="kpi"><span>${L[x]}</span><b>${fmt(x,r[x])}</b></div>`).join('')}</div>`;
+      m.innerHTML=`<h2>${c.t}</h2>${fb}<div class="kpis">${Object.keys(L).map(x=>`<div class="kpi"><span>${L[x]}</span><b>${fmt(x,r[x])}</b></div>`).join('')}</div>`;
+      return;
+    }
+    if(!rows.length){m.innerHTML=`<h2>${c.t}</h2>${fb}<div class="card">No data for these filters.</div>`;return}
+    if(k==='sales_forecast'){
+      const f=forecast,a=rows.filter(r=>r.type==='actual');
+      const sl=f.slope,trend=Math.abs(sl)<1?'no clear trend':(sl>0?'rising':'falling')+' by about '+fmt('x',Math.abs(sl))+' per month';
+      const note=`Based on the last ${f.n} complete months (${f.first} to ${f.last}; a complete month has 30+ orders) using a straight-line trend. Trend: ${trend}. `+(f.r2<0.3?'The trend explains very little of the month-to-month change (low R²), so use the 3-month average and the likely range as a rough guide.':'The trend fits the history reasonably well.');
+      m.innerHTML=`<h2>${c.t}</h2>${fb}<div class="kpis"><div class="kpi"><span>Forecast ${f.next_month} (trend)</span><b>${fmt('x',f.linear)}</b></div><div class="kpi"><span>3-month average</span><b>${fmt('x',f.ma3)}</b></div><div class="kpi"><span>Likely range (95%)</span><b style="font-size:15px">${fmt('x',f.low)} - ${fmt('x',f.high)}</b></div><div class="kpi"><span>Trend fit (R²)</span><b>${f.r2}</b></div></div><div class="card" style="margin-top:14px"><div class="box"><canvas id="cv"></canvas></div></div><div class="card"><p style="margin:0;font-size:13px;color:var(--muted)">${esc(note)}</p></div><div class="card">${table(rows)}</div>`;
+      const labels=a.map(r=>r.month).concat(f.next_month);
+      chart=new Chart($('#cv'),{type:'line',data:{labels,datasets:[
+        {label:'Actual revenue',data:a.map(r=>r.revenue).concat(null),borderColor:PAL[0],backgroundColor:PAL[0],tension:.3},
+        {label:'Forecast (trend)',data:a.map((r,i)=>i===a.length-1?r.revenue:null).concat(f.linear),borderColor:PAL[1],backgroundColor:PAL[1],borderDash:[6,4]}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:col}}},scales:{x:{ticks:{color:col}},y:{ticks:{color:col}}}}});
       return;
     }
     let data=rows.slice();
@@ -138,12 +185,22 @@ async function show(k){
       const pie=c.type==='doughnut';
       sets=c.y.map((y,i)=>({label:lab(y),data:data.map(r=>num(r[y])||0),backgroundColor:pie?PAL:PAL[i],borderColor:PAL[i],tension:.3}));
     }
-    m.innerHTML=`<h2>${c.t}</h2><div class="card"><div class="box"><canvas id="cv"></canvas></div></div><div class="card">${table(rows)}</div>`;
-    const col=getComputedStyle(document.body).color;
+    m.innerHTML=`<h2>${c.t}</h2>${fb}<div class="card"><div class="box"><canvas id="cv"></canvas></div></div><div class="card">${table(rows)}</div>`;
     chart=new Chart($('#cv'),{type:c.type,data:{labels,datasets:sets},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:c.type==='doughnut'||sets.length>1,labels:{color:col}}},
       scales:c.type==='doughnut'?{}:{x:{stacked:!!c.stack,ticks:{color:col}},y:{stacked:!!c.stack,ticks:{color:col}}}}});
-  }catch(e){m.innerHTML=`<div class="card err">${e.message}</div>`}
+  }catch(e){m.innerHTML=`<div class="card err">${esc(e.message)}</div>`}
+}
+function account(){
+  $('#main').innerHTML=`<h2>Change password</h2><div class="card"><input id="cp" type="password" placeholder="Current password" autocomplete="current-password"><input id="np1" type="password" placeholder="New password (8+ characters)" autocomplete="new-password"><input id="np2" type="password" placeholder="Repeat new password" autocomplete="new-password"><p id="am"></p><button class="btn" onclick="changePw()">Change password</button></div>`;
+}
+async function changePw(){
+  if($('#np1').value!==$('#np2').value)return msg('am','The new passwords do not match');
+  try{
+    await api('/api/change-password',{method:'POST',body:JSON.stringify({current_password:$('#cp').value,new_password:$('#np1').value})});
+    ['cp','np1','np2'].forEach(i=>$('#'+i).value='');
+    msg('am','Password changed. Use the new one next time you log in.',1);
+  }catch(e){msg('am',e.message)}
 }
 async function users(){
   const rows=await api('/api/users');
@@ -207,4 +264,5 @@ $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 if(token)start();
 </script>
 </body>
-</html>
+  </html>
+  

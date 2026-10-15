@@ -95,7 +95,11 @@ async function start(){
     $('#login').classList.add('hide');$('#app').classList.remove('hide');
     $('#who').textContent=me.name;$('#role').textContent=me.role.replace(/_/g,' ');
     const items=me.dashboards.map(k=>[k,(CFG[k]||{t:lab(k)}).t]);
-    if(me.role==='super_admin')items.push(['__users','Users']);
+    const R=me.role;
+    if(['super_admin','store_manager','logistics'].includes(R))items.push(['__orders','Orders']);
+    if(['super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
+    if(['super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
+    if(R==='super_admin')items.push(['__users','Users']);
     $('#nav').innerHTML=items.map(([k,t])=>`<button data-k="${k}">${t.split(' by ')[0].split(' (')[0]}</button>`).join('');
     $('#nav').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.k)};
     show(items[0][0]);
@@ -112,6 +116,9 @@ async function show(k){
   if(chart){chart.destroy();chart=null}
   try{
     if(k==='__users')return users();
+    if(k==='__orders')return orders();
+    if(k==='__neworder')return newOrder();
+    if(k==='__restock')return restock();
     const c=CFG[k]||{t:lab(k)};
     const {rows}=await api('/api/dashboard/'+k);
     if(k==='overview'){
@@ -152,6 +159,49 @@ async function addUser(){
     await api('/api/users',{method:'POST',body:JSON.stringify({full_name:$('#nn').value,email:$('#ne').value,password:$('#np').value,role_name:$('#nr').value})});
     users();
   }catch(e){$('#uerr').textContent=e.message}
+}
+
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const msg=(id,t,ok)=>{const e=$('#'+id);if(e){e.textContent=t;e.style.color=ok?'#2f9e44':'#e03131'}};
+async function orders(){
+  $('#main').innerHTML=`<h2>Orders</h2><div class="card"><select id="fs" onchange="loadOrders()"><option value="">All statuses</option><option>pending</option><option>delivered</option><option>cancelled</option><option>returned</option></select><input id="fq" placeholder="Search transaction ID" oninput="loadOrders()"><p id="om"></p><div id="ol"></div></div>`;
+  loadOrders();
+}
+const acts=r=>r.status==='pending'?`<button class="out" onclick="setSt('${r.transaction_id}','delivered')">Deliver</button> <button class="out" onclick="setSt('${r.transaction_id}','cancelled')">Cancel</button>`:r.status==='delivered'?`<button class="out" onclick="setSt('${r.transaction_id}','returned')">Return</button>`:'';
+async function loadOrders(){
+  try{
+    const rows=await api('/api/orders?status='+encodeURIComponent($('#fs').value)+'&q='+encodeURIComponent($('#fq').value.trim()));
+    $('#ol').innerHTML=rows.length?`<div class="tw"><table><tr><th>ID</th><th>Customer</th><th>Product</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.transaction_id)}</td><td>${esc(r.customer_name||'-')}</td><td>${esc(r.product_name)}</td><td>${r.quantity}</td><td>${fmt('x',r.total_price)}</td><td>${r.status}</td><td>${acts(r)}</td></tr>`).join('')}</table></div>`:'<p>No orders.</p>';
+  }catch(e){msg('om',e.message)}
+}
+async function setSt(id,s){
+  try{await api('/api/orders/'+id+'/status',{method:'PATCH',body:JSON.stringify({status:s})});await loadOrders();msg('om','Order '+id+' is now '+s,1)}catch(e){msg('om',e.message)}
+}
+async function newOrder(){
+  const ps=await api('/api/products');
+  $('#main').innerHTML=`<h2>New order</h2><div class="card">
+  <input id="oc" list="cl" placeholder="Customer: type name or ID" oninput="findCust(this.value)"><datalist id="cl"></datalist>
+  <select id="op">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} (${esc(p.category_name)}) - stock ${p.stock_qty}</option>`).join('')}</select>
+  <input id="oq" type="number" min="1" placeholder="Quantity"><input id="ot" type="number" min="0" placeholder="Total price">
+  <select id="opm">${['Cash','UPI','EMI','Debit Card','Credit Card'].map(x=>`<option>${x}</option>`).join('')}</select>
+  <p id="nm"></p><button class="btn" onclick="saveOrder()">Place order</button></div>`;
+}
+let ft;
+function findCust(v){clearTimeout(ft);if(v.length<2)return;ft=setTimeout(async()=>{try{const r=await api('/api/customers?q='+encodeURIComponent(v));$('#cl').innerHTML=r.map(c=>`<option value="${esc(c.customer_id)} - ${esc(c.customer_name)}">`).join('')}catch(e){}},300)}
+async function saveOrder(){
+  const cid=$('#oc').value.split(' - ')[0].trim();
+  try{
+    const d=await api('/api/orders',{method:'POST',body:JSON.stringify({customer_id:cid,product_id:+$('#op').value,quantity:+$('#oq').value,total_price:+$('#ot').value,payment_mode:$('#opm').value})});
+    msg('nm','Order '+d.transaction_id+' placed (pending). Deliver it from the Orders tab.',1);
+  }catch(e){msg('nm',e.message)}
+}
+async function restock(){
+  const ps=await api('/api/products');
+  $('#main').innerHTML=`<h2>Restock</h2><div class="card"><select id="rp">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} - stock ${p.stock_qty}</option>`).join('')}</select>
+  <input id="rq" type="number" min="1" placeholder="Quantity received"><p id="rm"></p><button class="btn" onclick="doRestock()">Add stock</button></div>`;
+}
+async function doRestock(){
+  try{const d=await api('/api/restock',{method:'POST',body:JSON.stringify({product_id:+$('#rp').value,quantity:+$('#rq').value})});await restock();msg('rm','Done. New stock: '+d.new_stock,1)}catch(e){msg('rm',e.message)}
 }
 $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 if(token)start();

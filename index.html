@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sales Store Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f5f6fa;--card:#fff;--text:#1d2433;--muted:#6b7385;--line:#e3e6ee;--brand:#3b5bdb}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--card:#1b2030;--text:#e8ebf3;--muted:#98a1b5;--line:#2c3348;--brand:#748ffc}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header b{font-size:16px}header small{color:var(--muted);display:block;font-size:12px}
+button{font:inherit;cursor:pointer}
+.btn{background:var(--brand);color:#fff;border:0;border-radius:8px;padding:10px 14px}
+.out{background:none;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;font-size:13px}
+nav{display:flex;gap:8px;overflow-x:auto;padding:12px 16px}
+nav button{white-space:nowrap;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:20px;padding:7px 14px;font-size:13px}
+nav button.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+main{padding:0 16px 32px;max-width:900px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+h2{font-size:17px;margin:4px 0 12px}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.kpi span{color:var(--muted);font-size:12px;display:block}.kpi b{font-size:20px}
+.box{position:relative;height:280px}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-weight:600}
+input,select{width:100%;padding:11px;margin:5px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+#login{max-width:360px;margin:12vh auto;padding:0 16px}
+.err{color:#e03131;font-size:14px;min-height:20px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div id="login">
+  <div class="card">
+    <h2>Sales Store Login</h2>
+    <input id="em" type="email" placeholder="Email" autocomplete="username">
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <p class="err" id="lerr"></p>
+    <button class="btn" style="width:100%" onclick="login()">Log in</button>
+  </div>
+</div>
+<div id="app" class="hide">
+  <header><div><b id="who"></b><small id="role"></small></div><button class="out" onclick="logout()">Log out</button></header>
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+<script>
+const API='https://sales-store-backend.vercel.app';
+const $=s=>document.querySelector(s);
+let token=null,chart=null;
+try{token=localStorage.getItem('tok')}catch(e){}
+const PAL=['#3b5bdb','#f08c00','#2f9e44','#e03131','#7048e8','#0c8599','#d6336c','#868e96'];
+const CFG={
+ overview:{t:'Overview'},
+ top_products:{t:'Top 5 products by quantity',type:'bar',x:'product_name',y:['units_sold']},
+ cancelled_products:{t:'Most cancelled products',type:'bar',x:'product_name',y:['cancelled_orders']},
+ top_customers:{t:'Top 5 customers by spending',type:'bar',x:'customer_name',y:['total_spent']},
+ revenue_by_category:{t:'Revenue by category',type:'bar',x:'category_name',y:['revenue']},
+ cancel_return_rate:{t:'Cancel / return rate by category (%)',type:'bar',x:'category_name',y:['cancel_return_pct']},
+ payment_modes:{t:'Payment modes',type:'doughnut',x:'payment_mode',y:['orders']},
+ age_behavior:{t:'Age group behavior (revenue)',type:'bar',x:'age_group',y:['revenue']},
+ monthly_sales:{t:'Monthly sales trend',type:'line',x:'month',y:['revenue']},
+ gender_category:{t:'Gender vs category (orders)',type:'bar',pivot:true},
+ peak_hours:{t:'Orders by hour of day',type:'bar',x:'hour_of_day',y:['orders'],sort:'hour_of_day'},
+ order_status:{t:'Order status',type:'doughnut',x:'status',y:['orders']},
+ lost_revenue:{t:'Lost revenue by month',type:'bar',x:'month',y:['cancelled_value','returned_value'],stack:true}
+};
+const num=v=>v!==null&&v!==''&&!isNaN(v)?Number(v):null;
+const fmt=(k,v)=>{if(v==null)return '-';if(k==='month')return String(v).slice(0,7);const n=num(v);return n!==null&&typeof v!=='boolean'?n.toLocaleString():v};
+const lab=k=>k.replace(/_/g,' ');
+async function api(p,o={}){
+  const r=await fetch(API+p,{...o,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})}});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){if(r.status===401&&token)logout();throw new Error(d.error||'Something went wrong')}
+  return d;
+}
+async function login(){
+  $('#lerr').textContent='';
+  try{
+    const d=await api('/api/login',{method:'POST',body:JSON.stringify({email:$('#em').value.trim(),password:$('#pw').value})});
+    token=d.token;try{localStorage.setItem('tok',token)}catch(e){}
+    start();
+  }catch(e){$('#lerr').textContent=e.message}
+}
+function logout(){token=null;try{localStorage.removeItem('tok')}catch(e){}location.reload()}
+async function start(){
+  try{
+    const me=await api('/api/me');
+    $('#login').classList.add('hide');$('#app').classList.remove('hide');
+    $('#who').textContent=me.name;$('#role').textContent=me.role.replace(/_/g,' ');
+    const items=me.dashboards.map(k=>[k,(CFG[k]||{t:lab(k)}).t]);
+    if(me.role==='super_admin')items.push(['__users','Users']);
+    $('#nav').innerHTML=items.map(([k,t])=>`<button data-k="${k}">${t.split(' by ')[0].split(' (')[0]}</button>`).join('');
+    $('#nav').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.k)};
+    show(items[0][0]);
+  }catch(e){}
+}
+function table(rows){
+  if(!rows.length)return '<p>No data.</p>';
+  const ks=Object.keys(rows[0]);
+  return `<div class="tw"><table><tr>${ks.map(k=>`<th>${lab(k)}</th>`).join('')}</tr>${rows.map(r=>`<tr>${ks.map(k=>`<td>${fmt(k,r[k])}</td>`).join('')}</tr>`).join('')}</table></div>`;
+}
+async function show(k){
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
+  const m=$('#main');m.innerHTML='<div class="card">Loading...</div>';
+  if(chart){chart.destroy();chart=null}
+  try{
+    if(k==='__users')return users();
+    const c=CFG[k]||{t:lab(k)};
+    const {rows}=await api('/api/dashboard/'+k);
+    if(k==='overview'){
+      const r=rows[0]||{};
+      const L={total_orders:'Total orders',delivered_orders:'Delivered',revenue:'Revenue',avg_order_value:'Avg order value',customers:'Customers',cancel_return_pct:'Cancel/return %'};
+      m.innerHTML=`<h2>${c.t}</h2><div class="kpis">${Object.keys(L).map(x=>`<div class="kpi"><span>${L[x]}</span><b>${fmt(x,r[x])}</b></div>`).join('')}</div>`;
+      return;
+    }
+    let data=rows.slice();
+    if(c.sort)data.sort((a,b)=>a[c.sort]-b[c.sort]);
+    let labels,sets;
+    if(c.pivot){
+      labels=[...new Set(data.map(r=>r.category_name))];
+      sets=['Male','Female'].map((g,i)=>({label:g,backgroundColor:PAL[i],data:labels.map(l=>{const r=data.find(x=>x.category_name===l&&x.gender===g);return r?num(r.orders):0})}));
+    }else{
+      labels=data.map(r=>fmt(c.x,r[c.x]));
+      const pie=c.type==='doughnut';
+      sets=c.y.map((y,i)=>({label:lab(y),data:data.map(r=>num(r[y])||0),backgroundColor:pie?PAL:PAL[i],borderColor:PAL[i],tension:.3}));
+    }
+    m.innerHTML=`<h2>${c.t}</h2><div class="card"><div class="box"><canvas id="cv"></canvas></div></div><div class="card">${table(rows)}</div>`;
+    const col=getComputedStyle(document.body).color;
+    chart=new Chart($('#cv'),{type:c.type,data:{labels,datasets:sets},options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:c.type==='doughnut'||sets.length>1,labels:{color:col}}},
+      scales:c.type==='doughnut'?{}:{x:{stacked:!!c.stack,ticks:{color:col}},y:{stacked:!!c.stack,ticks:{color:col}}}}});
+  }catch(e){m.innerHTML=`<div class="card err">${e.message}</div>`}
+}
+async function users(){
+  const rows=await api('/api/users');
+  const roles=['super_admin','senior_management','store_manager','inventory','marketing','logistics','finance'];
+  $('#main').innerHTML=`<h2>Users</h2><div class="card">${table(rows)}</div>
+  <div class="card"><h2>Add user</h2>
+  <input id="nn" placeholder="Full name"><input id="ne" type="email" placeholder="Email"><input id="np" type="password" placeholder="Password (8+ characters)">
+  <select id="nr">${roles.map(r=>`<option>${r}</option>`).join('')}</select>
+  <p class="err" id="uerr"></p><button class="btn" onclick="addUser()">Add user</button></div>`;
+}
+async function addUser(){
+  try{
+    await api('/api/users',{method:'POST',body:JSON.stringify({full_name:$('#nn').value,email:$('#ne').value,password:$('#np').value,role_name:$('#nr').value})});
+    users();
+  }catch(e){$('#uerr').textContent=e.message}
+}
+$('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
+if(token)start();
+</script>
+</body>
+</html>

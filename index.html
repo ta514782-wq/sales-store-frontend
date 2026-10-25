@@ -27,10 +27,15 @@ h2{font-size:17px;margin:4px 0 12px}
 .box{position:relative;height:280px}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-weight:600}
-input,select{width:100%;padding:11px;margin:5px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+input,select,textarea{width:100%;padding:11px;margin:5px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
 #login{max-width:360px;margin:12vh auto;padding:0 16px}
 .err{color:#e03131;font-size:14px;min-height:20px}
 .hide{display:none}
+textarea{font:inherit}
+#rc{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:20px;z-index:20}
+.rb{background:#fff;color:#111;width:100%;max-width:340px;padding:18px;border-radius:10px;font-size:14px}
+.rl{display:flex;justify-content:space-between;gap:8px;margin:4px 0}.tot{font-weight:700;font-size:16px}.mu{color:#666;font-size:12px}
+@media print{body>*:not(#rc){display:none!important}#rc{position:static;background:none;padding:0}.noprint{display:none}}
 .fg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
 label{font-size:12px;color:var(--muted)}
 </style>
@@ -80,7 +85,7 @@ const lab=k=>k.replace(/_/g,' ');
 async function api(p,o={}){
   const r=await fetch(API+p,{...o,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{}),...(SID?{'X-Store-Id':String(SID)}:{})}});
   const d=await r.json().catch(()=>({}));
-  if(!r.ok){if(r.status===401&&token)logout();throw new Error(d.error||'Something went wrong')}
+  if(!r.ok){if(r.status===401&&token)logout();const er=new Error(d.error||'Something went wrong');er.list=d.errors;throw er}
   return d;
 }
 async function login(){
@@ -113,6 +118,7 @@ async function start(){
     if(['platform_admin','super_admin','store_manager','logistics'].includes(R))items.push(['__orders','Orders']);
     if(['platform_admin','super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
     if(['platform_admin','super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
+    if(['platform_admin','super_admin','inventory'].includes(R))items.push(['__products','Products']);
     if(R==='platform_admin')items.push(['__stores','Stores']);
     if(['platform_admin','super_admin'].includes(R))items.push(['__users','Users']);
     items.push(['__account','Password']);
@@ -164,6 +170,7 @@ async function show(k){
     if(k==='__restock')return restock();
     if(k==='__account')return account();
     if(k==='__stores')return stores();
+    if(k==='__products')return products();
     const c=CFG[k]||{t:lab(k)};
     if(!CATS)CATS=await api('/api/categories');
     const {rows,forecast}=await api('/api/dashboard/'+k+qs());
@@ -238,7 +245,7 @@ async function orders(){
   $('#main').innerHTML=`<h2>Orders</h2><div class="card"><select id="fs" onchange="loadOrders()"><option value="">All statuses</option><option>pending</option><option>delivered</option><option>cancelled</option><option>returned</option></select><input id="fq" placeholder="Search transaction ID" oninput="loadOrders()"><p id="om"></p><div id="ol"></div></div>`;
   loadOrders();
 }
-const acts=r=>r.status==='pending'?`<button class="out" onclick="setSt('${r.transaction_id}','delivered')">Deliver</button> <button class="out" onclick="setSt('${r.transaction_id}','cancelled')">Cancel</button>`:r.status==='delivered'?`<button class="out" onclick="setSt('${r.transaction_id}','returned')">Return</button>`:'';
+const acts=r=>(r.status==='pending'?`<button class="out" onclick="setSt('${r.transaction_id}','delivered')">Deliver</button> <button class="out" onclick="setSt('${r.transaction_id}','cancelled')">Cancel</button> `:r.status==='delivered'?`<button class="out" onclick="setSt('${r.transaction_id}','returned')">Return</button> `:'')+`<button class="out" onclick="receipt('${r.transaction_id}')">Receipt</button>`;
 async function loadOrders(){
   try{
     const rows=await api('/api/orders?status='+encodeURIComponent($('#fs').value)+'&q='+encodeURIComponent($('#fq').value.trim()));
@@ -248,23 +255,33 @@ async function loadOrders(){
 async function setSt(id,s){
   try{await api('/api/orders/'+id+'/status',{method:'PATCH',body:JSON.stringify({status:s})});await loadOrders();msg('om','Order '+id+' is now '+s,1)}catch(e){msg('om',e.message)}
 }
+let PM={};
+const money=v=>Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2});
 async function newOrder(){
   const ps=await api('/api/products');
+  PM=Object.fromEntries(ps.map(p=>[p.product_id,p]));
   $('#main').innerHTML=`<h2>New order</h2><div class="card">
   <input id="oc" list="cl" placeholder="Customer: type name or ID" oninput="findCust(this.value)"><datalist id="cl"></datalist>
   <details><summary style="font-size:13px;color:var(--muted);cursor:pointer;margin:4px 0">New customer?</summary><input id="cn" placeholder="Customer name"><input id="ca" type="number" min="10" max="100" placeholder="Age"><select id="cg"><option>Female</option><option>Male</option></select><p id="cm"></p><button class="out" onclick="addCust()">Add customer</button></details>
-  <select id="op">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} (${esc(p.category_name)}) - stock ${p.stock_qty}</option>`).join('')}</select>
-  <input id="oq" type="number" min="1" placeholder="Quantity"><input id="ot" type="number" min="0" placeholder="Total price">
+  ${ps.length?`<select id="op" onchange="pv()">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} - ${money(p.unit_price)} (stock ${p.stock_qty})</option>`).join('')}</select>`:'<p>No products yet. Add or import products in the Products tab.</p>'}
+  <input id="oq" type="number" min="1" placeholder="Quantity" oninput="pv()"><input id="od" type="number" min="0" max="100" placeholder="Discount % (optional)" oninput="pv()">
   <select id="opm">${['Cash','UPI','EMI','Debit Card','Credit Card'].map(x=>`<option>${x}</option>`).join('')}</select>
-  <p id="nm"></p><button class="btn" onclick="saveOrder()">Place order</button></div>`;
+  <p id="pv" class="mu"></p><p id="nm"></p><div id="nr"></div><button class="btn" onclick="saveOrder()">Place order</button></div>`;
+  pv();
+}
+function pv(){
+  const p=PM[$('#op')&&$('#op').value];if(!p)return;
+  const q=+$('#oq').value||0,d=+$('#od').value||0,sub=+p.unit_price*q,di=sub*d/100,tx=(sub-di)*(+p.tax_rate)/100;
+  $('#pv').textContent=`Subtotal ${money(sub)} - discount ${money(di)} + tax ${money(tx)} = Total ${money(sub-di+tx)}`;
 }
 let ft;
 function findCust(v){clearTimeout(ft);if(v.length<2)return;ft=setTimeout(async()=>{try{const r=await api('/api/customers?q='+encodeURIComponent(v));$('#cl').innerHTML=r.map(c=>`<option value="${esc(c.customer_id)} - ${esc(c.customer_name)}">`).join('')}catch(e){}},300)}
 async function saveOrder(){
   const cid=$('#oc').value.split(' - ')[0].trim();
   try{
-    const d=await api('/api/orders',{method:'POST',body:JSON.stringify({customer_id:cid,product_id:+$('#op').value,quantity:+$('#oq').value,total_price:+$('#ot').value,payment_mode:$('#opm').value})});
-    msg('nm','Order '+d.transaction_id+' placed (pending). Deliver it from the Orders tab.',1);
+    const d=await api('/api/orders',{method:'POST',body:JSON.stringify({customer_id:cid,product_id:+$('#op').value,quantity:+$('#oq').value,discount_pct:$('#od').value||0,payment_mode:$('#opm').value})});
+    msg('nm','Order '+d.transaction_id+' placed (pending). Total '+money(d.total_price)+'. Deliver it from the Orders tab.',1);
+    $('#nr').innerHTML=`<button class="out" onclick="receipt('${d.transaction_id}')">Show receipt</button>`;
   }catch(e){msg('nm',e.message)}
 }
 async function restock(){
@@ -275,7 +292,7 @@ async function restock(){
 async function doRestock(){
   try{const d=await api('/api/restock',{method:'POST',body:JSON.stringify({product_id:+$('#rp').value,quantity:+$('#rq').value})});await restock();msg('rm','Done. New stock: '+d.new_stock,1)}catch(e){msg('rm',e.message)}
 }
-function switchStore(v){SID=+v;try{localStorage.setItem('sid',v)}catch(e){}show(CUR||'overview')}
+function switchStore(v){SID=+v;CATS=null;try{localStorage.setItem('sid',v)}catch(e){}show(CUR||'overview')}
 async function addCust(){
   try{
     const d=await api('/api/customers',{method:'POST',body:JSON.stringify({customer_name:$('#cn').value,age:+$('#ca').value,gender:$('#cg').value})});
@@ -286,19 +303,112 @@ async function addCust(){
 async function stores(){
   const rows=await api('/api/stores');
   $('#main').innerHTML=`<h2>Stores</h2><div class="card"><div class="tw"><table><tr><th>Store</th><th>City</th><th>Orders</th><th>Revenue</th><th>Users</th><th></th></tr>${rows.map(r=>`<tr><td>${esc(r.store_name)}</td><td>${esc(r.city||'-')}</td><td>${fmt('x',r.orders)}</td><td>${fmt('x',r.revenue)}</td><td>${r.users}</td><td><button class="out" onclick="openStore(${r.store_id})">Open</button></td></tr>`).join('')}</table></div></div>
-  <div class="card"><h2>Add a store</h2><input id="sn" placeholder="Store name"><input id="sc" placeholder="City (optional)"><input id="an" placeholder="Store admin full name"><input id="ae" type="email" placeholder="Store admin email"><input id="ap" type="password" placeholder="Store admin password (8+ characters)"><p id="sm"></p><button class="btn" onclick="addStore()">Create store</button></div>`;
+  <div class="card"><h2>Add a store</h2><input id="sn" placeholder="Store name"><input id="sc" placeholder="City (optional)">
+  <select id="scp"><option value="">Start with an empty product list</option>${rows.map(r=>`<option value="${r.store_id}">Copy products and prices from ${esc(r.store_name)}</option>`).join('')}</select>
+  <input id="an" placeholder="Store admin full name"><input id="ae" type="email" placeholder="Store admin email"><input id="ap" type="password" placeholder="Store admin password (8+ characters)"><p id="sm"></p><button class="btn" onclick="addStore()">Create store</button></div>`;
 }
-function openStore(id){SID=id;try{localStorage.setItem('sid',id)}catch(e){}$('#sw').value=id;show('overview')}
+function openStore(id){SID=id;CATS=null;try{localStorage.setItem('sid',id)}catch(e){}$('#sw').value=id;show('overview')}
 async function addStore(){
   try{
-    const d=await api('/api/stores',{method:'POST',body:JSON.stringify({store_name:$('#sn').value,city:$('#sc').value,admin_name:$('#an').value,admin_email:$('#ae').value,admin_password:$('#ap').value})});
+    const d=await api('/api/stores',{method:'POST',body:JSON.stringify({store_name:$('#sn').value,city:$('#sc').value,admin_name:$('#an').value,admin_email:$('#ae').value,admin_password:$('#ap').value,copy_from:$('#scp').value?+$('#scp').value:null})});
     try{localStorage.setItem('sid',d.store_id)}catch(e){}
-    const me=await api('/api/me');STORES=me.stores||[];SID=d.store_id;
+    const me=await api('/api/me');STORES=me.stores||[];SID=d.store_id;CATS=null;
     $('#sw').innerHTML=STORES.map(x=>`<option value="${x.store_id}"${x.store_id===SID?' selected':''}>${esc(x.store_name)}</option>`).join('');
     await stores();
-    msg('sm','Store created and selected. Its admin can log in now. Its stock starts at 0, so restock first.',1);
+    msg('sm','Store created and selected. Its admin can log in now. Its stock starts at 0, so add stock first.',1);
   }catch(e){msg('sm',e.message)}
 }
+let PL=[];
+async function products(){
+  const [ps,set,cats]=await Promise.all([api('/api/products'),api('/api/store-settings'),api('/api/categories')]);
+  PL=ps;
+  $('#main').innerHTML=`<h2>Products and prices</h2>
+  <div class="card"><label>Tax rate % (added to every order)</label><input id="tx" type="number" min="0" max="100" step="0.01" value="${set.tax_rate}"><button class="out" onclick="saveTax()">Save tax rate</button><p id="tm"></p></div>
+  <div class="card">${ps.length?`<div class="tw"><table><tr><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>${ps.map(p=>`<tr><td>${esc(p.product_name)}</td><td>${esc(p.category_name)}</td><td>${money(p.unit_price)}</td><td>${p.stock_qty}</td><td><button class="out" onclick="editPrice(${p.product_id})">Price</button> <button class="out" onclick="removeProd(${p.product_id})">Remove</button></td></tr>`).join('')}</table></div>`:'<p>No products yet. Add one below or import a CSV file.</p>'}<p id="pm"></p></div>
+  <div class="card"><h2>Add a product</h2><input id="pn" placeholder="Product name"><input id="pc" list="pcl" placeholder="Category (type or pick)"><datalist id="pcl">${cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist><input id="pp" type="number" min="0" step="0.01" placeholder="Price"><input id="ps" type="number" min="0" placeholder="Opening stock (optional)"><p id="am2"></p><button class="btn" onclick="addProduct()">Add product</button></div>
+  <div class="card"><h2>Import from CSV</h2>
+  <select id="it" onchange="tplInfo()"><option value="products">Products and prices</option><option value="customers">Customers</option><option value="stock">Add stock to existing products</option></select>
+  <p id="ith" class="mu"></p><button class="out" onclick="dlTpl()">Download example file</button>
+  <input type="file" id="if" accept=".csv,text/csv"><textarea id="itx" rows="4" placeholder="Or paste CSV text here (first line = column names)"></textarea>
+  <p id="imsg"></p><ul id="ierr" style="color:#e03131;font-size:13px"></ul><button class="btn" onclick="doImport()">Import</button></div>`;
+  tplInfo();
+}
+const TPL={
+  products:{cols:'product_name, category, unit_price (required); opening_stock, reorder_level (optional). Existing names get the new price.',csv:'product_name,category,unit_price,opening_stock\nMilk 1L,Groceries,250,40\nUSB Cable,Electronics,600,15\n'},
+  customers:{cols:'customer_name, age, gender (Male or Female). Customer IDs are created automatically.',csv:'customer_name,age,gender\nAli Khan,34,Male\nSara Ahmed,28,Female\n'},
+  stock:{cols:'product_name, quantity. The quantity is added to the current stock.',csv:'product_name,quantity\nMilk 1L,24\nUSB Cable,10\n'}
+};
+function tplInfo(){$('#ith').textContent='Columns: '+TPL[$('#it').value].cols}
+function dlTpl(){
+  const t=$('#it').value,a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([TPL[t].csv],{type:'text/csv'}));a.download=t+'_example.csv';
+  document.body.appendChild(a);a.click();a.remove();
+}
+function parseCsv(t){
+  t=t.replace(/^\ufeff/,'');
+  const rows=[];let row=[],cur='',q=false;
+  for(let i=0;i<t.length;i++){
+    const ch=t[i];
+    if(q){if(ch==='"'){if(t[i+1]==='"'){cur+='"';i++}else q=false}else cur+=ch}
+    else if(ch==='"')q=true;
+    else if(ch===','){row.push(cur);cur=''}
+    else if(ch==='\n'||ch==='\r'){if(ch==='\r'&&t[i+1]==='\n')i++;row.push(cur);cur='';if(row.some(x=>x.trim()!==''))rows.push(row);row=[]}
+    else cur+=ch;
+  }
+  row.push(cur);if(row.some(x=>x.trim()!==''))rows.push(row);
+  if(rows.length<2)return [];
+  const h=rows[0].map(x=>x.trim().toLowerCase().replace(/\s+/g,'_'));
+  return rows.slice(1).map(r=>Object.fromEntries(h.map((k,i)=>[k,(r[i]||'').trim()])));
+}
+async function doImport(){
+  $('#ierr').innerHTML='';msg('imsg','Importing...',1);
+  try{
+    const f=$('#if').files[0];
+    const text=f?await f.text():$('#itx').value;
+    const rows=parseCsv(text);
+    if(!rows.length)throw new Error('No data found. Choose a CSV file or paste text with a header line and data lines.');
+    const t=$('#it').value;
+    const d=await api('/api/import/'+t,{method:'POST',body:JSON.stringify({rows})});
+    const r=t==='products'?`Done: ${d.created} new, ${d.updated} updated.`:t==='customers'?`Done: ${d.created} customers added.`:`Done: stock added for ${d.updated} products.`;
+    await products();msg('imsg',r,1);
+  }catch(e){
+    msg('imsg',e.message);
+    if(e.list)$('#ierr').innerHTML=e.list.map(x=>`<li>${esc(x)}</li>`).join('');
+  }
+}
+async function saveTax(){
+  try{await api('/api/store-settings',{method:'PATCH',body:JSON.stringify({tax_rate:+$('#tx').value})});msg('tm','Saved. New orders use this tax rate.',1)}catch(e){msg('tm',e.message)}
+}
+async function editPrice(id){
+  const p=PL.find(x=>x.product_id===id);if(!p)return;
+  const v=prompt('New price for '+p.product_name,p.unit_price);
+  if(v===null||v.trim()==='')return;
+  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({unit_price:+v})});await products();msg('pm','Price updated.',1)}catch(e){msg('pm',e.message)}
+}
+async function removeProd(id){
+  const p=PL.find(x=>x.product_id===id);
+  if(!p||!confirm('Remove '+p.product_name+' from the product list? Old orders are kept.'))return;
+  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({is_active:false})});await products();msg('pm','Product removed.',1)}catch(e){msg('pm',e.message)}
+}
+async function addProduct(){
+  try{
+    await api('/api/products',{method:'POST',body:JSON.stringify({product_name:$('#pn').value,category:$('#pc').value,unit_price:+$('#pp').value,opening_stock:$('#ps').value})});
+    await products();msg('pm','Product added.',1);
+  }catch(e){msg('am2',e.message)}
+}
+async function receipt(id){
+  try{
+    const r=await api('/api/orders/'+id);
+    const d=String(r.purchase_date||'').slice(0,10),t=String(r.purchase_time||'').slice(0,8);
+    const ln=(a,b)=>`<div class="rl"><span>${a}</span><span>${b}</span></div>`;
+    const br=r.subtotal!==null&&r.subtotal!==undefined;
+    closeRc();
+    const el=document.createElement('div');el.id='rc';
+    el.innerHTML=`<div class="rb"><h3 style="margin:0">${esc(r.store_name)}</h3><div class="mu">${esc(r.city||'')}</div><hr>${ln('Receipt',esc(r.transaction_id))}${ln('Date',esc(d+' '+t))}${ln('Customer',esc(r.customer_name||'-'))}${ln('Payment',esc(r.payment_mode||'-'))}${ln('Status',esc(r.status))}<hr>${ln(esc(r.product_name)+' x '+r.quantity,br?money(r.subtotal):'')}${br?ln('Unit price',money(r.unit_price))+ln('Discount','- '+money(r.discount))+ln('Tax',money(r.tax)):''}<hr><div class="rl tot"><span>Total</span><span>${money(r.total_price)}</span></div><p class="mu">Thank you for shopping with us.</p><div class="noprint"><button class="btn" onclick="window.print()">Print</button> <button class="out" onclick="closeRc()">Close</button></div></div>`;
+    document.body.appendChild(el);
+  }catch(e){alert(e.message)}
+}
+function closeRc(){const e=$('#rc');if(e)e.remove()}
 $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 if(token)start();
 </script>

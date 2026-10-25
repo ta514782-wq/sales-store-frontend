@@ -46,14 +46,14 @@ label{font-size:12px;color:var(--muted)}
   </div>
 </div>
 <div id="app" class="hide">
-  <header><div><b id="who"></b><small id="role"></small></div><button class="out" onclick="logout()">Log out</button></header>
+  <header><div><b id="who"></b><small id="role"></small></div><div style="display:flex;gap:8px;align-items:center"><select id="sw" class="hide" onchange="switchStore(this.value)" style="width:auto;max-width:140px;margin:0;padding:6px"></select><button class="out" onclick="logout()">Log out</button></div></header>
   <nav id="nav"></nav>
   <main id="main"></main>
 </div>
 <script>
 const API='https://sales-store-backend.vercel.app';
 const $=s=>document.querySelector(s);
-let token=null,chart=null;
+let token=null,chart=null,SID=null,STORES=[],CUR=null;
 try{token=localStorage.getItem('tok')}catch(e){}
 const PAL=['#3b5bdb','#f08c00','#2f9e44','#e03131','#7048e8','#0c8599','#d6336c','#868e96'];
 const CFG={
@@ -78,7 +78,7 @@ const num=v=>v!==null&&v!==''&&!isNaN(v)?Number(v):null;
 const fmt=(k,v)=>{if(v==null)return '-';if(k==='month')return String(v).slice(0,7);const n=num(v);return n!==null&&typeof v!=='boolean'?n.toLocaleString():v};
 const lab=k=>k.replace(/_/g,' ');
 async function api(p,o={}){
-  const r=await fetch(API+p,{...o,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})}});
+  const r=await fetch(API+p,{...o,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{}),...(SID?{'X-Store-Id':String(SID)}:{})}});
   const d=await r.json().catch(()=>({}));
   if(!r.ok){if(r.status===401&&token)logout();throw new Error(d.error||'Something went wrong')}
   return d;
@@ -96,13 +96,25 @@ async function start(){
   try{
     const me=await api('/api/me');
     $('#login').classList.add('hide');$('#app').classList.remove('hide');
-    $('#who').textContent=me.name;$('#role').textContent=me.role.replace(/_/g,' ');
+    $('#who').textContent=me.name;
+    const RL={super_admin:'store admin',platform_admin:'platform admin'};
+    $('#role').textContent=(RL[me.role]||me.role.replace(/_/g,' '))+(me.store?' · '+me.store.name:'');
+    if(me.role==='platform_admin'){
+      STORES=me.stores||[];
+      let sid=0;try{sid=+localStorage.getItem('sid')}catch(e){}
+      if(!STORES.some(x=>x.store_id===sid))sid=STORES.length?STORES[0].store_id:null;
+      SID=sid;
+      const sw=$('#sw');
+      sw.innerHTML=STORES.map(x=>`<option value="${x.store_id}"${x.store_id===SID?' selected':''}>${esc(x.store_name)}</option>`).join('');
+      sw.classList.remove('hide');
+    }
     const items=me.dashboards.map(k=>[k,(CFG[k]||{t:lab(k)}).t]);
     const R=me.role;
-    if(['super_admin','store_manager','logistics'].includes(R))items.push(['__orders','Orders']);
-    if(['super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
-    if(['super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
-    if(R==='super_admin')items.push(['__users','Users']);
+    if(['platform_admin','super_admin','store_manager','logistics'].includes(R))items.push(['__orders','Orders']);
+    if(['platform_admin','super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
+    if(['platform_admin','super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
+    if(R==='platform_admin')items.push(['__stores','Stores']);
+    if(['platform_admin','super_admin'].includes(R))items.push(['__users','Users']);
     items.push(['__account','Password']);
     $('#nav').innerHTML=items.map(([k,t])=>`<button data-k="${k}">${t.split(' by ')[0].split(' (')[0]}</button>`).join('');
     $('#nav').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.k)};
@@ -133,7 +145,7 @@ function applyF(k){
 function resetF(k){FIL={from:'',to:'',cat:''};show(k)}
 async function csv(k){
   try{
-    const r=await fetch(API+'/api/dashboard/'+k+qs()+'&format=csv',{headers:{Authorization:'Bearer '+token}});
+    const r=await fetch(API+'/api/dashboard/'+k+qs()+'&format=csv',{headers:{Authorization:'Bearer '+token,...(SID?{'X-Store-Id':String(SID)}:{})}});
     if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.error||'Download failed')}
     const b=await r.blob(),a=document.createElement('a');
     a.href=URL.createObjectURL(b);a.download=k+'.csv';document.body.appendChild(a);a.click();a.remove();
@@ -141,6 +153,7 @@ async function csv(k){
   }catch(e){msg('fm',e.message)}
 }
 async function show(k){
+  CUR=k;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
   const m=$('#main');m.innerHTML='<div class="card">Loading...</div>';
   if(chart){chart.destroy();chart=null}
@@ -150,6 +163,7 @@ async function show(k){
     if(k==='__neworder')return newOrder();
     if(k==='__restock')return restock();
     if(k==='__account')return account();
+    if(k==='__stores')return stores();
     const c=CFG[k]||{t:lab(k)};
     if(!CATS)CATS=await api('/api/categories');
     const {rows,forecast}=await api('/api/dashboard/'+k+qs());
@@ -238,6 +252,7 @@ async function newOrder(){
   const ps=await api('/api/products');
   $('#main').innerHTML=`<h2>New order</h2><div class="card">
   <input id="oc" list="cl" placeholder="Customer: type name or ID" oninput="findCust(this.value)"><datalist id="cl"></datalist>
+  <details><summary style="font-size:13px;color:var(--muted);cursor:pointer;margin:4px 0">New customer?</summary><input id="cn" placeholder="Customer name"><input id="ca" type="number" min="10" max="100" placeholder="Age"><select id="cg"><option>Female</option><option>Male</option></select><p id="cm"></p><button class="out" onclick="addCust()">Add customer</button></details>
   <select id="op">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} (${esc(p.category_name)}) - stock ${p.stock_qty}</option>`).join('')}</select>
   <input id="oq" type="number" min="1" placeholder="Quantity"><input id="ot" type="number" min="0" placeholder="Total price">
   <select id="opm">${['Cash','UPI','EMI','Debit Card','Credit Card'].map(x=>`<option>${x}</option>`).join('')}</select>
@@ -260,9 +275,32 @@ async function restock(){
 async function doRestock(){
   try{const d=await api('/api/restock',{method:'POST',body:JSON.stringify({product_id:+$('#rp').value,quantity:+$('#rq').value})});await restock();msg('rm','Done. New stock: '+d.new_stock,1)}catch(e){msg('rm',e.message)}
 }
+function switchStore(v){SID=+v;try{localStorage.setItem('sid',v)}catch(e){}show(CUR||'overview')}
+async function addCust(){
+  try{
+    const d=await api('/api/customers',{method:'POST',body:JSON.stringify({customer_name:$('#cn').value,age:+$('#ca').value,gender:$('#cg').value})});
+    $('#oc').value=d.customer_id+' - '+d.customer_name;
+    msg('cm','Added '+d.customer_id+'. It is filled in above.',1);
+  }catch(e){msg('cm',e.message)}
+}
+async function stores(){
+  const rows=await api('/api/stores');
+  $('#main').innerHTML=`<h2>Stores</h2><div class="card"><div class="tw"><table><tr><th>Store</th><th>City</th><th>Orders</th><th>Revenue</th><th>Users</th><th></th></tr>${rows.map(r=>`<tr><td>${esc(r.store_name)}</td><td>${esc(r.city||'-')}</td><td>${fmt('x',r.orders)}</td><td>${fmt('x',r.revenue)}</td><td>${r.users}</td><td><button class="out" onclick="openStore(${r.store_id})">Open</button></td></tr>`).join('')}</table></div></div>
+  <div class="card"><h2>Add a store</h2><input id="sn" placeholder="Store name"><input id="sc" placeholder="City (optional)"><input id="an" placeholder="Store admin full name"><input id="ae" type="email" placeholder="Store admin email"><input id="ap" type="password" placeholder="Store admin password (8+ characters)"><p id="sm"></p><button class="btn" onclick="addStore()">Create store</button></div>`;
+}
+function openStore(id){SID=id;try{localStorage.setItem('sid',id)}catch(e){}$('#sw').value=id;show('overview')}
+async function addStore(){
+  try{
+    const d=await api('/api/stores',{method:'POST',body:JSON.stringify({store_name:$('#sn').value,city:$('#sc').value,admin_name:$('#an').value,admin_email:$('#ae').value,admin_password:$('#ap').value})});
+    try{localStorage.setItem('sid',d.store_id)}catch(e){}
+    const me=await api('/api/me');STORES=me.stores||[];SID=d.store_id;
+    $('#sw').innerHTML=STORES.map(x=>`<option value="${x.store_id}"${x.store_id===SID?' selected':''}>${esc(x.store_name)}</option>`).join('');
+    await stores();
+    msg('sm','Store created and selected. Its admin can log in now. Its stock starts at 0, so restock first.',1);
+  }catch(e){msg('sm',e.message)}
+}
 $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 if(token)start();
 </script>
 </body>
-  </html>
-  
+</html>

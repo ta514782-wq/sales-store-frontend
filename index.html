@@ -58,7 +58,7 @@ label{font-size:12px;color:var(--muted)}
 <script>
 const API='https://sales-store-backend.vercel.app';
 const $=s=>document.querySelector(s);
-let token=null,chart=null,SID=null,STORES=[],CUR=null;
+let token=null,chart=null,SID=null,STORES=[],CUR=null,ROLE='',ME_ID=0;
 try{token=localStorage.getItem('tok')}catch(e){}
 const PAL=['#3b5bdb','#f08c00','#2f9e44','#e03131','#7048e8','#0c8599','#d6336c','#868e96'];
 const CFG={
@@ -114,13 +114,14 @@ async function start(){
       sw.classList.remove('hide');
     }
     const items=me.dashboards.map(k=>[k,(CFG[k]||{t:lab(k)}).t]);
-    const R=me.role;
+    const R=me.role;ROLE=R;ME_ID=me.id;
     if(['platform_admin','super_admin','store_manager','logistics'].includes(R))items.push(['__orders','Orders']);
     if(['platform_admin','super_admin','store_manager'].includes(R))items.push(['__neworder','New order']);
     if(['platform_admin','super_admin','inventory'].includes(R))items.push(['__restock','Restock']);
     if(['platform_admin','super_admin','inventory'].includes(R))items.push(['__products','Products']);
+    if(['platform_admin','super_admin','inventory','store_manager'].includes(R))items.push(['__po','Purchasing']);
     if(R==='platform_admin')items.push(['__stores','Stores']);
-    if(['platform_admin','super_admin'].includes(R))items.push(['__users','Users']);
+    if(['platform_admin','super_admin'].includes(R))items.push(['__users','Staff']);
     items.push(['__account','Password']);
     $('#nav').innerHTML=items.map(([k,t])=>`<button data-k="${k}">${t.split(' by ')[0].split(' (')[0]}</button>`).join('');
     $('#nav').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.k)};
@@ -171,6 +172,7 @@ async function show(k){
     if(k==='__account')return account();
     if(k==='__stores')return stores();
     if(k==='__products')return products();
+    if(k==='__po')return purchasing();
     const c=CFG[k]||{t:lab(k)};
     if(!CATS)CATS=await api('/api/categories');
     const {rows,forecast}=await api('/api/dashboard/'+k+qs());
@@ -223,15 +225,22 @@ async function changePw(){
     msg('am','Password changed. Use the new one next time you log in.',1);
   }catch(e){msg('am',e.message)}
 }
+const RLN=r=>({super_admin:'store admin'}[r]||r.replace(/_/g,' '));
 async function users(){
   const rows=await api('/api/users');
   const roles=['super_admin','senior_management','store_manager','inventory','marketing','logistics','finance'];
-  $('#main').innerHTML=`<h2>Users</h2><div class="card">${table(rows)}</div>
-  <div class="card"><h2>Add user</h2>
+  $('#main').innerHTML=`<h2>Staff</h2><div class="card"><div class="tw"><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr>${rows.map(u=>{const me=u.user_id===ME_ID;return `<tr><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td><td>${me?esc(RLN(u.role_name)):`<select onchange="setRole(${u.user_id},this.value)" style="width:auto;margin:0;padding:4px">${roles.map(r=>`<option value="${r}"${r===u.role_name?' selected':''}>${esc(RLN(r))}</option>`).join('')}</select>`}</td><td>${u.is_active?'Active':'Inactive'}</td><td>${me?'(you)':`<button class="out" onclick="toggleUser(${u.user_id},${!u.is_active})">${u.is_active?'Deactivate':'Activate'}</button> <button class="out" onclick="resetPw(${u.user_id})">Reset password</button>`}</td></tr>`}).join('')}</table></div><p id="um"></p></div>
+  <div class="card"><h2>Add staff member</h2>
   <input id="nn" placeholder="Full name"><input id="ne" type="email" placeholder="Email"><input id="np" type="password" placeholder="Password (8+ characters)">
-  <select id="nr">${roles.map(r=>`<option>${r}</option>`).join('')}</select>
+  <select id="nr">${roles.map(r=>`<option value="${r}">${esc(RLN(r))}</option>`).join('')}</select>
   <p class="err" id="uerr"></p><button class="btn" onclick="addUser()">Add user</button></div>`;
 }
+async function patchUser(id,body,okText){
+  try{await api('/api/users/'+id,{method:'PATCH',body:JSON.stringify(body)});await users();msg('um',okText,1)}catch(e){await users();msg('um',e.message)}
+}
+function setRole(id,r){if(confirm('Change this person\'s role to '+RLN(r)+'?'))patchUser(id,{role_name:r},'Role changed.');else users()}
+function toggleUser(id,on){if(confirm(on?'Activate this account?':'Deactivate this account? They will be logged out.'))patchUser(id,{is_active:on},on?'Account activated.':'Account deactivated.')}
+function resetPw(id){const v=prompt('Type a new temporary password (8+ characters). Tell the person to change it in the Password tab.');if(v)patchUser(id,{new_password:v},'Password reset.')}
 async function addUser(){
   try{
     await api('/api/users',{method:'POST',body:JSON.stringify({full_name:$('#nn').value,email:$('#ne').value,password:$('#np').value,role_name:$('#nr').value})});
@@ -409,6 +418,72 @@ async function receipt(id){
   }catch(e){alert(e.message)}
 }
 function closeRc(){const e=$('#rc');if(e)e.remove()}
+let POL=[],PSUP=[],PPR=[];
+async function purchasing(){
+  const [list,sup,ps]=await Promise.all([api('/api/purchase-orders'),api('/api/suppliers'),api('/api/products')]);
+  PSUP=sup;PPR=ps;POL=[];
+  const w=['platform_admin','super_admin','inventory'].includes(ROLE);
+  const act=sup.filter(x=>x.is_active);
+  $('#main').innerHTML=`<h2>Purchasing</h2>
+  <div class="card">${list.length?`<div class="tw"><table><tr><th>PO</th><th>Supplier</th><th>Status</th><th>Lines</th><th>Cost</th><th></th></tr>${list.map(r=>`<tr><td>PO${r.po_id}</td><td>${esc(r.supplier_name)}</td><td>${r.status}</td><td>${r.lines}</td><td>${money(r.total_cost)}</td><td><button class="out" onclick="viewPO(${r.po_id})">Open</button></td></tr>`).join('')}</table></div>`:'<p>No purchase orders yet.</p>'}</div>
+  ${w?`<div class="card"><h2>New purchase order</h2>
+  ${act.length?`<select id="psup">${act.map(x=>`<option value="${x.supplier_id}">${esc(x.supplier_name)}</option>`).join('')}</select>`:'<p>Add a supplier first (below).</p>'}
+  <button class="out" onclick="fillLow()">Add all low-stock products</button>
+  <select id="lp">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} (stock ${p.stock_qty})</option>`).join('')}</select>
+  <input id="lq" type="number" min="1" placeholder="Quantity"><input id="lc" type="number" min="0" step="0.01" placeholder="Cost per unit (optional)">
+  <button class="out" onclick="addLine()">Add line</button><div id="pl"></div>
+  <input id="pnote" placeholder="Note (optional)"><p id="pom"></p><button class="btn" onclick="createPO()">Create purchase order</button></div>
+  <div class="card"><h2>Suppliers</h2>${sup.length?`<div class="tw"><table><tr><th>Name</th><th>Phone</th><th>City</th><th></th></tr>${sup.map(x=>`<tr><td>${esc(x.supplier_name)}</td><td>${esc(x.phone||'-')}</td><td>${esc(x.city||'-')}</td><td><button class="out" onclick="toggleSup(${x.supplier_id},${!x.is_active})">${x.is_active?'Deactivate':'Activate'}</button></td></tr>`).join('')}</table></div>`:'<p>No suppliers yet.</p>'}
+  <input id="sun" placeholder="Supplier name"><input id="sup" placeholder="Phone (optional)"><input id="suc" placeholder="City (optional)"><p id="sum"></p><button class="btn" onclick="addSup()">Add supplier</button></div>`:''}`;
+  if(w)renderLines();
+}
+function renderLines(){
+  $('#pl').innerHTML=POL.length?`<div class="tw"><table><tr><th>Product</th><th>Qty</th><th>Cost</th><th></th></tr>${POL.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${l.qty}</td><td>${money(l.cost)}</td><td><button class="out" onclick="delLine(${i})">x</button></td></tr>`).join('')}</table></div>`:'<p class="mu">No lines yet.</p>';
+}
+function delLine(i){POL.splice(i,1);renderLines()}
+function addLine(){
+  const pid=+$('#lp').value,q=+$('#lq').value,c=+$('#lc').value||0;
+  if(!pid||!(q>=1))return msg('pom','Choose a product and a quantity of 1 or more');
+  const p=PPR.find(x=>x.product_id===pid),ex=POL.find(l=>l.product_id===pid);
+  if(ex){ex.qty+=q;if(c)ex.cost=c}else POL.push({product_id:pid,name:p.product_name,qty:q,cost:c});
+  renderLines();msg('pom','',1);
+}
+async function fillLow(){
+  try{
+    const r=await api('/api/purchase-orders/suggestions');
+    r.forEach(x=>{if(!POL.find(l=>l.product_id===x.product_id))POL.push({product_id:x.product_id,name:x.product_name,qty:+x.suggested_qty,cost:0})});
+    renderLines();msg('pom',r.length?r.length+' low-stock product(s) added. Change the quantities if you like.':'No products are low on stock.',1);
+  }catch(e){msg('pom',e.message)}
+}
+async function createPO(){
+  try{
+    const d=await api('/api/purchase-orders',{method:'POST',body:JSON.stringify({supplier_id:+($('#psup')||{}).value,notes:$('#pnote').value,items:POL.map(l=>({product_id:l.product_id,qty:l.qty,unit_cost:l.cost}))})});
+    await purchasing();msg('pom','Purchase order PO'+d.po_id+' created.',1);
+  }catch(e){msg('pom',e.message)}
+}
+async function addSup(){
+  try{await api('/api/suppliers',{method:'POST',body:JSON.stringify({supplier_name:$('#sun').value,phone:$('#sup').value,city:$('#suc').value})});await purchasing();msg('sum','Supplier added.',1)}catch(e){msg('sum',e.message)}
+}
+async function toggleSup(id,on){
+  try{await api('/api/suppliers/'+id,{method:'PATCH',body:JSON.stringify({is_active:on})});await purchasing()}catch(e){msg('sum',e.message)}
+}
+async function viewPO(id){
+  try{
+    const d=await api('/api/purchase-orders/'+id);
+    const w=['platform_admin','super_admin','inventory'].includes(ROLE),open=d.status==='ordered';
+    $('#main').innerHTML=`<h2>PO${d.po_id} - ${esc(d.supplier_name)}</h2><div class="card"><p>Status: <b>${d.status}</b>${d.notes?'<br>Note: '+esc(d.notes):''}</p>
+    <div class="tw"><table><tr><th>Product</th><th>Ordered</th><th>Cost</th><th>Received</th></tr>${d.lines.map(l=>`<tr><td>${esc(l.product_name)}</td><td>${l.qty_ordered}</td><td>${money(l.unit_cost)}</td><td>${open&&w?`<input type="number" min="0" id="rc${l.product_id}" value="${l.qty_ordered}" style="width:90px;margin:0">`:(l.qty_received===null?'-':l.qty_received)}</td></tr>`).join('')}</table></div>
+    <p id="vm"></p>${open&&w?`<button class="btn" onclick="recvPO(${d.po_id},[${d.lines.map(l=>l.product_id)}])">Receive stock</button> <button class="out" onclick="cancelPO(${d.po_id})">Cancel order</button> `:''}<button class="out" onclick="purchasing()">Back</button></div>`;
+  }catch(e){alert(e.message)}
+}
+async function recvPO(id,pids){
+  const received={};pids.forEach(p=>{received[p]=+$('#rc'+p).value});
+  try{await api('/api/purchase-orders/'+id+'/receive',{method:'POST',body:JSON.stringify({received})});await viewPO(id);msg('vm','Stock received and added to inventory.',1)}catch(e){msg('vm',e.message)}
+}
+async function cancelPO(id){
+  if(!confirm('Cancel this purchase order?'))return;
+  try{await api('/api/purchase-orders/'+id+'/cancel',{method:'POST',body:'{}'});await viewPO(id);msg('vm','Purchase order cancelled.',1)}catch(e){msg('vm',e.message)}
+}
 $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 if(token)start();
 </script>

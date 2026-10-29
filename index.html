@@ -161,6 +161,7 @@ async function csv(k){
 }
 async function show(k){
   CUR=k;
+  if(H5)stopScan();
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
   const m=$('#main');m.innerHTML='<div class="card">Loading...</div>';
   if(chart){chart.destroy();chart=null}
@@ -251,55 +252,128 @@ async function addUser(){
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const msg=(id,t,ok)=>{const e=$('#'+id);if(e){e.textContent=t;e.style.color=ok?'#2f9e44':'#e03131'}};
 async function orders(){
-  $('#main').innerHTML=`<h2>Orders</h2><div class="card"><select id="fs" onchange="loadOrders()"><option value="">All statuses</option><option>pending</option><option>delivered</option><option>cancelled</option><option>returned</option></select><input id="fq" placeholder="Search transaction ID" oninput="loadOrders()"><p id="om"></p><div id="ol"></div></div>`;
+  $('#main').innerHTML=`<h2>Sales and orders</h2><div class="card"><select id="fs" onchange="loadOrders()"><option value="">All statuses</option><option>pending</option><option>delivered</option><option>cancelled</option><option>returned</option></select><input id="fq" placeholder="Search sale number or customer" oninput="loadOrders()"><p id="om"></p><div id="ol"></div></div>`;
   loadOrders();
 }
-const acts=r=>(r.status==='pending'?`<button class="out" onclick="setSt('${r.transaction_id}','delivered')">Deliver</button> <button class="out" onclick="setSt('${r.transaction_id}','cancelled')">Cancel</button> `:r.status==='delivered'?`<button class="out" onclick="setSt('${r.transaction_id}','returned')">Return</button> `:'')+`<button class="out" onclick="receipt('${r.transaction_id}')">Receipt</button>`;
+const acts=r=>(r.status==='pending'?`<button class="out" onclick="setSt(${r.sale_id},'delivered')">Deliver</button> <button class="out" onclick="setSt(${r.sale_id},'cancelled')">Cancel</button> `:r.status==='delivered'?`<button class="out" onclick="setSt(${r.sale_id},'returned')">Return</button> `:'')+`<button class="out" onclick="receipt(${r.sale_id})">Receipt</button>`;
 async function loadOrders(){
   try{
-    const rows=await api('/api/orders?status='+encodeURIComponent($('#fs').value)+'&q='+encodeURIComponent($('#fq').value.trim()));
-    $('#ol').innerHTML=rows.length?`<div class="tw"><table><tr><th>ID</th><th>Customer</th><th>Product</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.transaction_id)}</td><td>${esc(r.customer_name||'-')}</td><td>${esc(r.product_name)}</td><td>${r.quantity}</td><td>${fmt('x',r.total_price)}</td><td>${r.status}</td><td>${acts(r)}</td></tr>`).join('')}</table></div>`:'<p>No orders.</p>';
+    const rows=await api('/api/sales?status='+encodeURIComponent($('#fs').value)+'&q='+encodeURIComponent($('#fq').value.trim()));
+    $('#ol').innerHTML=rows.length?`<div class="tw"><table><tr><th>Sale</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>#${r.sale_id}</td><td>${esc(r.customer_name||'Walk-in')}</td><td>${r.items}</td><td>${money(r.total)}</td><td>${r.status}</td><td>${acts(r)}</td></tr>`).join('')}</table></div>`:'<p>No sales found.</p>';
   }catch(e){msg('om',e.message)}
 }
 async function setSt(id,s){
-  try{await api('/api/orders/'+id+'/status',{method:'PATCH',body:JSON.stringify({status:s})});await loadOrders();msg('om','Order '+id+' is now '+s,1)}catch(e){msg('om',e.message)}
+  try{await api('/api/sales/'+id+'/status',{method:'PATCH',body:JSON.stringify({status:s})});await loadOrders();msg('om','Sale #'+id+' is now '+s,1)}catch(e){msg('om',e.message)}
 }
 let PM={};
 const money=v=>Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2});
-async function newOrder(){
-  const ps=await api('/api/products');
-  PM=Object.fromEntries(ps.map(p=>[p.product_id,p]));
-  $('#main').innerHTML=`<h2>New order</h2><div class="card">
-  <input id="oc" list="cl" placeholder="Customer: type name or ID" oninput="findCust(this.value)"><datalist id="cl"></datalist>
-  <details><summary style="font-size:13px;color:var(--muted);cursor:pointer;margin:4px 0">New customer?</summary><input id="cn" placeholder="Customer name"><input id="ca" type="number" min="10" max="100" placeholder="Age"><select id="cg"><option>Female</option><option>Male</option></select><p id="cm"></p><button class="out" onclick="addCust()">Add customer</button></details>
-  ${ps.length?`<select id="op" onchange="pv()">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} - ${money(p.unit_price)} (stock ${p.stock_qty})</option>`).join('')}</select>`:'<p>No products yet. Add or import products in the Products tab.</p>'}
-  <input id="oq" type="number" min="1" placeholder="Quantity" oninput="pv()"><input id="od" type="number" min="0" max="100" placeholder="Discount % (optional)" oninput="pv()">
-  <select id="opm">${['Cash','UPI','EMI','Debit Card','Credit Card'].map(x=>`<option>${x}</option>`).join('')}</select>
-  <p id="pv" class="mu"></p><p id="nm"></p><div id="nr"></div><button class="btn" onclick="saveOrder()">Place order</button></div>`;
-  pv();
+let CART=[],PC={},pt,H5=null,lastCode='',lastT=0;
+const r2=x=>Math.round(x*100)/100;
+function loadScript(u){
+  return new Promise((res,rej)=>{
+    if(document.querySelector('script[src="'+u+'"]'))return res();
+    const el=document.createElement('script');el.src=u;el.onload=res;
+    el.onerror=()=>rej(new Error('Could not load the scanner. Check your internet connection.'));
+    document.head.appendChild(el);
+  });
 }
-function pv(){
-  const p=PM[$('#op')&&$('#op').value];if(!p)return;
-  const q=+$('#oq').value||0,d=+$('#od').value||0,sub=+p.unit_price*q,di=sub*d/100,tx=(sub-di)*(+p.tax_rate)/100;
-  $('#pv').textContent=`Subtotal ${money(sub)} - discount ${money(di)} + tax ${money(tx)} = Total ${money(sub-di+tx)}`;
+function pSearch(el){
+  clearTimeout(pt);const v=el.value.trim();if(v.length<2)return;
+  pt=setTimeout(async()=>{try{
+    const r=await api('/api/products?limit=15&q='+encodeURIComponent(v));
+    r.forEach(p=>{PC[p.product_name.toLowerCase()]=p});
+    $('#'+el.getAttribute('list')).innerHTML=r.map(p=>`<option value="${esc(p.product_name)}">`).join('');
+  }catch(e){}},300);
+}
+const pFind=v=>PC[String(v||'').trim().toLowerCase()];
+async function getProd(id){
+  const v=$('#'+id).value.trim();let p=pFind(v);
+  if(!p&&v){const r=await api('/api/products?limit=1&barcode='+encodeURIComponent(v));if(r[0]){p=r[0];PC[p.product_name.toLowerCase()]=p}}
+  return p;
+}
+async function newOrder(){
+  CART=[];
+  $('#main').innerHTML=`<h2>Checkout</h2><div class="card">
+  <input id="sc" list="scl" autocomplete="off" placeholder="Scan a barcode or type a product name, then Enter" oninput="pSearch(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();addByCode(this.value);this.value=''}"><datalist id="scl"></datalist>
+  <button class="out" onclick="startScan()">Scan with camera</button>
+  <div id="scanbox" class="hide"><div id="reader" style="width:100%"></div><button class="out" onclick="stopScan()">Close camera</button></div>
+  <p id="cm2"></p><div id="cart"></div></div>
+  <div class="card"><input id="oc" list="cl" placeholder="Customer (optional, empty = walk-in)" oninput="findCust(this.value)"><datalist id="cl"></datalist>
+  <details><summary style="font-size:13px;color:var(--muted);cursor:pointer;margin:4px 0">New customer?</summary><input id="cn" placeholder="Customer name"><input id="ca" type="number" min="10" max="100" placeholder="Age"><select id="cg"><option>Female</option><option>Male</option></select><p id="cm"></p><button class="out" onclick="addCust()">Add customer</button></details>
+  <input id="od" type="number" min="0" max="100" placeholder="Discount % on the whole basket (optional)" oninput="renderCart()">
+  <select id="opm">${['Cash','UPI','EMI','Debit Card','Credit Card'].map(x=>`<option>${x}</option>`).join('')}</select>
+  <label style="display:flex;gap:8px;align-items:center;font-size:14px;color:var(--text)"><input type="checkbox" id="odl" checked style="width:auto;margin:0"> Customer pays and takes the goods now (reduces stock)</label>
+  <p id="pv" class="mu"></p><p id="nm"></p><div id="nr"></div><button class="btn" onclick="saveOrder()">Complete sale</button></div>`;
+  renderCart();
+  setTimeout(()=>{const e=$('#sc');if(e)e.focus()},50);
+}
+async function addByCode(v){
+  v=String(v||'').trim();if(!v)return;
+  try{
+    let p=null;
+    if(/^[A-Za-z0-9-]{3,40}$/.test(v)){const r=await api('/api/products?limit=1&barcode='+encodeURIComponent(v));p=r[0]||null}
+    if(!p)p=pFind(v);
+    if(!p){const r=await api('/api/products?limit=5&q='+encodeURIComponent(v));p=r.find(x=>x.product_name.toLowerCase()===v.toLowerCase())||(r.length===1?r[0]:null)}
+    if(!p)return msg('cm2','No product found for "'+v+'"');
+    const ex=CART.find(l=>l.p.product_id===p.product_id);
+    if(ex)ex.qty++;else CART.push({p,qty:1});
+    msg('cm2',p.product_name+' added',1);renderCart();
+  }catch(e){msg('cm2',e.message)}
+}
+function renderCart(){
+  const d=+(($('#od')||{}).value)||0;let sub=0,di=0,tx=0;
+  const rows=CART.map((l,i)=>{
+    const s=r2(+l.p.unit_price*l.qty),dd=r2(s*d/100),t=r2((s-dd)*(+l.p.tax_rate)/100);sub+=s;di+=dd;tx+=t;
+    return `<tr><td>${esc(l.p.product_name)}</td><td>${money(l.p.unit_price)}</td><td><input type="number" min="1" value="${l.qty}" style="width:70px;margin:0" onchange="setQty(${i},this.value)"></td><td>${money(s)}</td><td><button class="out" onclick="delItem(${i})">x</button></td></tr>`;
+  }).join('');
+  const c=$('#cart');if(!c)return;
+  c.innerHTML=CART.length?`<div class="tw"><table><tr><th>Product</th><th>Price</th><th>Qty</th><th>Line</th><th></th></tr>${rows}</table></div>`:'<p class="mu">The basket is empty. Scan a product.</p>';
+  $('#pv').textContent=CART.length?`Subtotal ${money(sub)} - discount ${money(di)} + tax ${money(tx)} = Total ${money(sub-di+tx)}`:'';
+}
+function setQty(i,v){const q=parseInt(v,10);if(q>=1)CART[i].qty=q;renderCart()}
+function delItem(i){CART.splice(i,1);renderCart()}
+async function startScan(){
+  try{
+    await loadScript('https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js');
+    await stopScan();
+    $('#scanbox').classList.remove('hide');
+    H5=new Html5Qrcode('reader');
+    await H5.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:140}},code=>{
+      if(code===lastCode&&Date.now()-lastT<2500)return;
+      lastCode=code;lastT=Date.now();addByCode(code);
+    });
+  }catch(e){
+    $('#scanbox').classList.add('hide');
+    msg('cm2',e&&e.message?e.message:'The camera could not start. Allow camera access in your browser, or type the barcode instead.');
+  }
+}
+async function stopScan(){
+  if(H5){try{await H5.stop();H5.clear()}catch(e){}H5=null}
+  const b=$('#scanbox');if(b)b.classList.add('hide');
 }
 let ft;
 function findCust(v){clearTimeout(ft);if(v.length<2)return;ft=setTimeout(async()=>{try{const r=await api('/api/customers?q='+encodeURIComponent(v));$('#cl').innerHTML=r.map(c=>`<option value="${esc(c.customer_id)} - ${esc(c.customer_name)}">`).join('')}catch(e){}},300)}
 async function saveOrder(){
   const cid=$('#oc').value.split(' - ')[0].trim();
+  if(!CART.length)return msg('nm','Add at least one product first');
   try{
-    const d=await api('/api/orders',{method:'POST',body:JSON.stringify({customer_id:cid,product_id:+$('#op').value,quantity:+$('#oq').value,discount_pct:$('#od').value||0,payment_mode:$('#opm').value})});
-    msg('nm','Order '+d.transaction_id+' placed (pending). Total '+money(d.total_price)+'. Deliver it from the Orders tab.',1);
-    $('#nr').innerHTML=`<button class="out" onclick="receipt('${d.transaction_id}')">Show receipt</button>`;
+    const d=await api('/api/sales',{method:'POST',body:JSON.stringify({customer_id:cid||null,payment_mode:$('#opm').value,discount_pct:$('#od').value||0,deliver:$('#odl').checked,items:CART.map(l=>({product_id:l.p.product_id,qty:l.qty}))})});
+    await stopScan();
+    msg('nm','Sale #'+d.sale_id+' done. Total '+money(d.total)+(d.status==='pending'?' (pending: deliver it from the Orders tab).':'.'),1);
+    $('#nr').innerHTML=`<button class="out" onclick="receipt(${d.sale_id})">Show receipt</button> <button class="out" onclick="newOrder()">New sale</button>`;
+    CART=[];renderCart();
   }catch(e){msg('nm',e.message)}
 }
 async function restock(){
-  const ps=await api('/api/products');
-  $('#main').innerHTML=`<h2>Restock</h2><div class="card"><select id="rp">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} - stock ${p.stock_qty}</option>`).join('')}</select>
-  <input id="rq" type="number" min="1" placeholder="Quantity received"><p id="rm"></p><button class="btn" onclick="doRestock()">Add stock</button></div>`;
+  $('#main').innerHTML=`<h2>Restock</h2><div class="card"><input id="rp" list="rpl" autocomplete="off" placeholder="Product: type 2+ letters or scan its barcode" oninput="pSearch(this)"><datalist id="rpl"></datalist><input id="rq" type="number" min="1" placeholder="Quantity received"><p id="rm"></p><button class="btn" onclick="doRestock()">Add stock</button></div>`;
 }
 async function doRestock(){
-  try{const d=await api('/api/restock',{method:'POST',body:JSON.stringify({product_id:+$('#rp').value,quantity:+$('#rq').value})});await restock();msg('rm','Done. New stock: '+d.new_stock,1)}catch(e){msg('rm',e.message)}
+  try{
+    const p=await getProd('rp');
+    if(!p)return msg('rm','Pick a product from the list, or type its exact name or barcode');
+    const d=await api('/api/restock',{method:'POST',body:JSON.stringify({product_id:p.product_id,quantity:+$('#rq').value})});
+    await restock();msg('rm',p.product_name+' now has '+d.new_stock+' in stock.',1);
+  }catch(e){msg('rm',e.message)}
 }
 function switchStore(v){SID=+v;CATS=null;try{localStorage.setItem('sid',v)}catch(e){}show(CUR||'overview')}
 async function addCust(){
@@ -327,23 +401,47 @@ async function addStore(){
     msg('sm','Store created and selected. Its admin can log in now. Its stock starts at 0, so add stock first.',1);
   }catch(e){msg('sm',e.message)}
 }
-let PL=[];
+let PL=[],pdt;
 async function products(){
-  const [ps,set,cats]=await Promise.all([api('/api/products'),api('/api/store-settings'),api('/api/categories')]);
-  PL=ps;
+  const [set,cats]=await Promise.all([api('/api/store-settings'),api('/api/categories')]);
   $('#main').innerHTML=`<h2>Products and prices</h2>
-  <div class="card"><label>Tax rate % (added to every order)</label><input id="tx" type="number" min="0" max="100" step="0.01" value="${set.tax_rate}"><button class="out" onclick="saveTax()">Save tax rate</button><p id="tm"></p></div>
-  <div class="card">${ps.length?`<div class="tw"><table><tr><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>${ps.map(p=>`<tr><td>${esc(p.product_name)}</td><td>${esc(p.category_name)}</td><td>${money(p.unit_price)}</td><td>${p.stock_qty}</td><td><button class="out" onclick="editPrice(${p.product_id})">Price</button> <button class="out" onclick="removeProd(${p.product_id})">Remove</button></td></tr>`).join('')}</table></div>`:'<p>No products yet. Add one below or import a CSV file.</p>'}<p id="pm"></p></div>
-  <div class="card"><h2>Add a product</h2><input id="pn" placeholder="Product name"><input id="pc" list="pcl" placeholder="Category (type or pick)"><datalist id="pcl">${cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist><input id="pp" type="number" min="0" step="0.01" placeholder="Price"><input id="ps" type="number" min="0" placeholder="Opening stock (optional)"><p id="am2"></p><button class="btn" onclick="addProduct()">Add product</button></div>
+  <div class="card"><label>Tax rate % (added to every sale)</label><input id="tx" type="number" min="0" max="100" step="0.01" value="${set.tax_rate}"><button class="out" onclick="saveTax()">Save tax rate</button><p id="tm"></p></div>
+  <div class="card"><input id="psq" placeholder="Search by name or barcode" oninput="clearTimeout(pdt);pdt=setTimeout(loadProducts,300)"><div id="ptab"></div><p id="pm"></p></div>
+  <div class="card"><h2>Add a product</h2><input id="pn" placeholder="Product name"><input id="pc" list="pcl" placeholder="Category (type or pick)"><datalist id="pcl">${cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist><input id="pb" placeholder="Barcode (optional)"><input id="pp" type="number" min="0" step="0.01" placeholder="Price"><input id="ps" type="number" min="0" placeholder="Opening stock (optional)"><p id="am2"></p><button class="btn" onclick="addProduct()">Add product</button></div>
   <div class="card"><h2>Import from CSV</h2>
   <select id="it" onchange="tplInfo()"><option value="products">Products and prices</option><option value="customers">Customers</option><option value="stock">Add stock to existing products</option></select>
   <p id="ith" class="mu"></p><button class="out" onclick="dlTpl()">Download example file</button>
   <input type="file" id="if" accept=".csv,text/csv"><textarea id="itx" rows="4" placeholder="Or paste CSV text here (first line = column names)"></textarea>
   <p id="imsg"></p><ul id="ierr" style="color:#e03131;font-size:13px"></ul><button class="btn" onclick="doImport()">Import</button></div>`;
-  tplInfo();
+  tplInfo();loadProducts();
+}
+async function loadProducts(){
+  try{
+    PL=await api('/api/products?limit=100&q='+encodeURIComponent(($('#psq')||{}).value||''));
+    $('#ptab').innerHTML=PL.length?`<div class="tw"><table><tr><th>Product</th><th>Barcode</th><th>Category</th><th>Price</th><th>Stock</th><th></th></tr>${PL.map(p=>`<tr><td>${esc(p.product_name)}</td><td>${esc(p.barcode||'-')}</td><td>${esc(p.category_name)}</td><td>${money(p.unit_price)}</td><td>${p.stock_qty}</td><td><button class="out" onclick="editPrice(${p.product_id})">Price</button> <button class="out" onclick="editBarcode(${p.product_id})">Barcode</button> <button class="out" onclick="showBarcode(${p.product_id})">Label</button> <button class="out" onclick="removeProd(${p.product_id})">Remove</button></td></tr>`).join('')}</table></div><p class="mu">Showing up to 100 products. Search to narrow the list.</p>`:'<p>No products found. Add one below or import a CSV file.</p>';
+  }catch(e){msg('pm',e.message)}
+}
+async function editBarcode(id){
+  const p=PL.find(x=>x.product_id===id);if(!p)return;
+  const v=prompt('Barcode for '+p.product_name+' (leave empty to remove it)',p.barcode||'');
+  if(v===null)return;
+  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({barcode:v})});await loadProducts();msg('pm','Barcode saved.',1)}catch(e){msg('pm',e.message)}
+}
+async function showBarcode(id){
+  const p=PL.find(x=>x.product_id===id);if(!p)return;
+  if(!p.barcode)return alert('This product has no barcode yet. Tap Barcode to add one.');
+  try{
+    await loadScript('https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js');
+    closeRc();
+    const el=document.createElement('div');el.id='rc';
+    el.innerHTML=`<div class="rb" style="text-align:center"><b>${esc(p.product_name)}</b><br><svg id="bcs"></svg><div class="mu">${money(p.unit_price)}</div><div class="noprint"><button class="btn" onclick="window.print()">Print</button> <button class="out" onclick="closeRc()">Close</button></div></div>`;
+    document.body.appendChild(el);
+    try{JsBarcode('#bcs',p.barcode,{format:/^\d{13}$/.test(p.barcode)?'EAN13':'CODE128',height:70,displayValue:true})}
+    catch(e){JsBarcode('#bcs',p.barcode,{format:'CODE128',height:70,displayValue:true})}
+  }catch(e){alert(e.message)}
 }
 const TPL={
-  products:{cols:'product_name, category, unit_price (required); opening_stock, reorder_level (optional). Existing names get the new price.',csv:'product_name,category,unit_price,opening_stock\nMilk 1L,Groceries,250,40\nUSB Cable,Electronics,600,15\n'},
+  products:{cols:'product_name, category, unit_price (required); opening_stock, reorder_level, barcode (optional). Existing names get the new price.',csv:'product_name,category,unit_price,opening_stock,barcode\nMilk 1L,Groceries,250,40,2000000000015\nUSB Cable,Electronics,600,15,2000000000022\n'},
   customers:{cols:'customer_name, age, gender (Male or Female). Customer IDs are created automatically.',csv:'customer_name,age,gender\nAli Khan,34,Male\nSara Ahmed,28,Female\n'},
   stock:{cols:'product_name, quantity. The quantity is added to the current stock.',csv:'product_name,quantity\nMilk 1L,24\nUSB Cable,10\n'}
 };
@@ -392,36 +490,36 @@ async function editPrice(id){
   const p=PL.find(x=>x.product_id===id);if(!p)return;
   const v=prompt('New price for '+p.product_name,p.unit_price);
   if(v===null||v.trim()==='')return;
-  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({unit_price:+v})});await products();msg('pm','Price updated.',1)}catch(e){msg('pm',e.message)}
+  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({unit_price:+v})});await loadProducts();msg('pm','Price updated.',1)}catch(e){msg('pm',e.message)}
 }
 async function removeProd(id){
   const p=PL.find(x=>x.product_id===id);
   if(!p||!confirm('Remove '+p.product_name+' from the product list? Old orders are kept.'))return;
-  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({is_active:false})});await products();msg('pm','Product removed.',1)}catch(e){msg('pm',e.message)}
+  try{await api('/api/products/'+id,{method:'PATCH',body:JSON.stringify({is_active:false})});await loadProducts();msg('pm','Product removed.',1)}catch(e){msg('pm',e.message)}
 }
 async function addProduct(){
   try{
-    await api('/api/products',{method:'POST',body:JSON.stringify({product_name:$('#pn').value,category:$('#pc').value,unit_price:+$('#pp').value,opening_stock:$('#ps').value})});
+    await api('/api/products',{method:'POST',body:JSON.stringify({product_name:$('#pn').value,category:$('#pc').value,unit_price:+$('#pp').value,opening_stock:$('#ps').value,barcode:$('#pb').value})});
     await products();msg('pm','Product added.',1);
   }catch(e){msg('am2',e.message)}
 }
 async function receipt(id){
   try{
-    const r=await api('/api/orders/'+id);
+    const r=await api('/api/sales/'+id);
     const d=String(r.purchase_date||'').slice(0,10),t=String(r.purchase_time||'').slice(0,8);
     const ln=(a,b)=>`<div class="rl"><span>${a}</span><span>${b}</span></div>`;
-    const br=r.subtotal!==null&&r.subtotal!==undefined;
+    const br=r.has_breakdown;
     closeRc();
     const el=document.createElement('div');el.id='rc';
-    el.innerHTML=`<div class="rb"><h3 style="margin:0">${esc(r.store_name)}</h3><div class="mu">${esc(r.city||'')}</div><hr>${ln('Receipt',esc(r.transaction_id))}${ln('Date',esc(d+' '+t))}${ln('Customer',esc(r.customer_name||'-'))}${ln('Payment',esc(r.payment_mode||'-'))}${ln('Status',esc(r.status))}<hr>${ln(esc(r.product_name)+' x '+r.quantity,br?money(r.subtotal):'')}${br?ln('Unit price',money(r.unit_price))+ln('Discount','- '+money(r.discount))+ln('Tax',money(r.tax)):''}<hr><div class="rl tot"><span>Total</span><span>${money(r.total_price)}</span></div><p class="mu">Thank you for shopping with us.</p><div class="noprint"><button class="btn" onclick="window.print()">Print</button> <button class="out" onclick="closeRc()">Close</button></div></div>`;
+    el.innerHTML=`<div class="rb"><h3 style="margin:0">${esc(r.store_name)}</h3><div class="mu">${esc(r.city||'')}</div><hr>${ln('Receipt','#'+r.sale_id)}${ln('Date',esc(d+' '+t))}${ln('Customer',esc(r.customer_name||'Walk-in'))}${ln('Payment',esc(r.payment_mode||'-'))}${ln('Status',esc(r.status))}<hr>${r.lines.map(l=>ln(esc(l.product_name)+' x '+l.quantity,money(br?l.subtotal:l.total_price))).join('')}<hr>${br?ln('Subtotal',money(r.subtotal))+ln('Discount','- '+money(r.discount))+ln('Tax',money(r.tax)):''}<div class="rl tot"><span>Total</span><span>${money(r.total)}</span></div><p class="mu">Thank you for shopping with us.</p><div class="noprint"><button class="btn" onclick="window.print()">Print</button> <button class="out" onclick="closeRc()">Close</button></div></div>`;
     document.body.appendChild(el);
   }catch(e){alert(e.message)}
 }
 function closeRc(){const e=$('#rc');if(e)e.remove()}
 let POL=[],PSUP=[],PPR=[];
 async function purchasing(){
-  const [list,sup,ps]=await Promise.all([api('/api/purchase-orders'),api('/api/suppliers'),api('/api/products')]);
-  PSUP=sup;PPR=ps;POL=[];
+  const [list,sup]=await Promise.all([api('/api/purchase-orders'),api('/api/suppliers')]);
+  PSUP=sup;POL=[];
   const w=['platform_admin','super_admin','inventory'].includes(ROLE);
   const act=sup.filter(x=>x.is_active);
   $('#main').innerHTML=`<h2>Purchasing</h2>
@@ -429,7 +527,7 @@ async function purchasing(){
   ${w?`<div class="card"><h2>New purchase order</h2>
   ${act.length?`<select id="psup">${act.map(x=>`<option value="${x.supplier_id}">${esc(x.supplier_name)}</option>`).join('')}</select>`:'<p>Add a supplier first (below).</p>'}
   <button class="out" onclick="fillLow()">Add all low-stock products</button>
-  <select id="lp">${ps.map(p=>`<option value="${p.product_id}">${esc(p.product_name)} (stock ${p.stock_qty})</option>`).join('')}</select>
+  <input id="lp" list="lpl" autocomplete="off" placeholder="Product: type 2+ letters or scan its barcode" oninput="pSearch(this)"><datalist id="lpl"></datalist>
   <input id="lq" type="number" min="1" placeholder="Quantity"><input id="lc" type="number" min="0" step="0.01" placeholder="Cost per unit (optional)">
   <button class="out" onclick="addLine()">Add line</button><div id="pl"></div>
   <input id="pnote" placeholder="Note (optional)"><p id="pom"></p><button class="btn" onclick="createPO()">Create purchase order</button></div>
@@ -441,12 +539,14 @@ function renderLines(){
   $('#pl').innerHTML=POL.length?`<div class="tw"><table><tr><th>Product</th><th>Qty</th><th>Cost</th><th></th></tr>${POL.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${l.qty}</td><td>${money(l.cost)}</td><td><button class="out" onclick="delLine(${i})">x</button></td></tr>`).join('')}</table></div>`:'<p class="mu">No lines yet.</p>';
 }
 function delLine(i){POL.splice(i,1);renderLines()}
-function addLine(){
-  const pid=+$('#lp').value,q=+$('#lq').value,c=+$('#lc').value||0;
-  if(!pid||!(q>=1))return msg('pom','Choose a product and a quantity of 1 or more');
-  const p=PPR.find(x=>x.product_id===pid),ex=POL.find(l=>l.product_id===pid);
-  if(ex){ex.qty+=q;if(c)ex.cost=c}else POL.push({product_id:pid,name:p.product_name,qty:q,cost:c});
-  renderLines();msg('pom','',1);
+async function addLine(){
+  try{
+    const p=await getProd('lp'),q=+$('#lq').value,c=+$('#lc').value||0;
+    if(!p||!(q>=1))return msg('pom','Pick a product (type 2+ letters or its barcode) and a quantity of 1 or more');
+    const ex=POL.find(l=>l.product_id===p.product_id);
+    if(ex){ex.qty+=q;if(c)ex.cost=c}else POL.push({product_id:p.product_id,name:p.product_name,qty:q,cost:c});
+    renderLines();msg('pom','',1);$('#lp').value='';
+  }catch(e){msg('pom',e.message)}
 }
 async function fillLow(){
   try{
